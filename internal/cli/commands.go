@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/azhany/codecli/internal/config"
 	"github.com/azhany/codecli/internal/tools"
 )
 

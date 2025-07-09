@@ -3,11 +3,10 @@ package llm
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"github.com/ollama/go-ollama"
 	"github.com/azhany/codecli/internal/config"
 	"github.com/azhany/codecli/internal/tools"
+	"github.com/ollama/go-ollama"
 )
 
 // Client represents the LLM client
@@ -20,14 +19,14 @@ type Client struct {
 func NewClient() (*Client, error) {
 	cfg := config.Config.Ollama
 	client := ollama.NewClient(cfg.URL)
-	
+
 	// Initialize tools
 	tools := make(map[string]tools.Tool)
 	for toolType, toolFactory := range tools.ToolRegistry {
 		tool := toolFactory()
 		tools[tool.Name()] = tool
 	}
-	
+
 	return &Client{
 		client: client,
 		tools:  tools,
@@ -44,13 +43,13 @@ func (c *Client) Chat(ctx context.Context, message string, tools []string) (stri
 		},
 		Tools: tools,
 	}
-	
+
 	// Send request
 	stream, err := c.client.Chat(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("failed to start chat: %v", err)
 	}
-	
+
 	// Process response
 	var response string
 	for {
@@ -60,7 +59,7 @@ func (c *Client) Chat(ctx context.Context, message string, tools []string) (stri
 		}
 		response += msg.Content
 	}
-	
+
 	return response, nil
 }
 
@@ -70,7 +69,7 @@ func (c *Client) ExecuteTool(toolName string, args map[string]interface{}) (inte
 	if !exists {
 		return nil, fmt.Errorf("tool %s not found", toolName)
 	}
-	
+
 	return tool.Execute(args)
 }
 
@@ -80,11 +79,11 @@ func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) 
 		Model: config.Config.Ollama.EmbeddingModel,
 		Text:  text,
 	}
-	
+
 	resp, err := c.client.Embed(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate embedding: %v", err)
 	}
-	
+
 	return resp.Embedding, nil
 }
