@@ -21,11 +21,16 @@ This document provides comprehensive examples of how to use the CodeCLI tool.
    ollama pull nomic-embed-text
    ```
 
+4. **Install dependencies**:
+  ```bash
+  go mod tidy
+  ```
+
 4. **Build CodeCLI**:
    ```bash
    make build
    # or
-   go build -o codecli .
+   go build -o codecli ./cmd/codecli
    ```
 
 ## Basic Commands
