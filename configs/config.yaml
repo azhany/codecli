@@ -1,0 +1,38 @@
+# Ollama Configuration
+ollama:
+  url: "http://localhost:11434"
+  chat_model: "llama2"
+  code_model: "codellama"
+  embedding_model: "nomic-embed-text"
+  timeout: "30s"
+
+# NGT Configuration
+ngt:
+  index_path: ".codecli/index"
+  dimension: 768
+  edge_size: 10
+  batch_size: 100
+
+# Workspace Configuration
+workspace:
+  root: "./"
+  exclude_patterns:
+    - "*.git*"
+    - "node_modules"
+    - "*.log"
+    - "*.tmp"
+  include_extensions:
+    - ".go"
+    - ".py"
+    - ".js"
+    - ".ts"
+    - ".java"
+    - ".cpp"
+    - ".c"
+    - ".h"
+
+# Logging Configuration
+logging:
+  level: "info"
+  format: "json"
+  output: "stdout"
