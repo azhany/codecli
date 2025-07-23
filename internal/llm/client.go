@@ -1,89 +1,129 @@
 package llm
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 
 	"github.com/azhany/codecli/internal/config"
-	"github.com/azhany/codecli/internal/tools"
-	"github.com/ollama/go-ollama"
 )
 
 // Client represents the LLM client
 type Client struct {
-	client *ollama.Client
-	tools  map[string]tools.Tool
+	httpClient *http.Client
+	baseURL    string
 }
 
 // NewClient creates a new LLM client
 func NewClient() (*Client, error) {
 	cfg := config.Config.Ollama
-	client := ollama.NewClient(cfg.URL)
-
-	// Initialize tools
-	tools := make(map[string]tools.Tool)
-	for toolType, toolFactory := range tools.ToolRegistry {
-		tool := toolFactory()
-		tools[tool.Name()] = tool
-	}
-
 	return &Client{
-		client: client,
-		tools:  tools,
+		httpClient: &http.Client{},
+		baseURL:    cfg.URL,
 	}, nil
+}
+
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ChatRequest struct {
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+}
+
+type ChatResponse struct {
+	Message struct {
+		Content string `json:"content"`
+	} `json:"message"`
+}
+
+type EmbeddingsRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+}
+
+type EmbeddingsResponse struct {
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
 // Chat sends a message to the LLM and processes the response
 func (c *Client) Chat(ctx context.Context, message string, tools []string) (string, error) {
-	// Create chat request
-	req := ollama.ChatRequest{
+	reqBody := ChatRequest{
 		Model: config.Config.Ollama.ChatModel,
-		Messages: []ollama.Message{
+		Messages: []Message{
 			{Role: "user", Content: message},
 		},
-		Tools: tools,
 	}
 
-	// Send request
-	stream, err := c.client.Chat(ctx, req)
+	reqBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to start chat: %v", err)
+		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	// Process response
-	var response string
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			break
-		}
-		response += msg.Content
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/chat", bytes.NewReader(reqBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	return response, nil
-}
-
-// ExecuteTool executes a tool with the given arguments
-func (c *Client) ExecuteTool(toolName string, args map[string]interface{}) (interface{}, error) {
-	tool, exists := c.tools[toolName]
-	if !exists {
-		return nil, fmt.Errorf("tool %s not found", toolName)
+	var chatResp ChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return "", fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	return tool.Execute(args)
+	return chatResp.Message.Content, nil
 }
 
 // EmbedText generates embeddings for text
 func (c *Client) EmbedText(ctx context.Context, text string) ([]float32, error) {
-	req := ollama.EmbedRequest{
-		Model: config.Config.Ollama.EmbeddingModel,
-		Text:  text,
+	reqBody := EmbeddingsRequest{
+		Model:  config.Config.Ollama.EmbeddingModel,
+		Prompt: text,
 	}
 
-	resp, err := c.client.Embed(ctx, req)
+	reqBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate embedding: %v", err)
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	return resp.Embedding, nil
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+"/api/embeddings", bytes.NewReader(reqBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var embedResp EmbeddingsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&embedResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	if len(embedResp.Embeddings) == 0 || len(embedResp.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("empty embeddings in response")
+	}
+
+	return embedResp.Embeddings[0], nil
 }

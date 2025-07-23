@@ -5,15 +5,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/azhany/codecli/internal/config"
 	"github.com/azhany/codecli/internal/llm"
-	"github.com/nipponnagoya/ngt-go"
+	"github.com/azhany/codecli/internal/types"
 )
+
+// Store handles vector storage and retrieval
+type Store struct {
+	embeddings map[string][]float64
+	metadata   map[string]*FileMetadata
+	mu         sync.RWMutex
+	llmClient  *llm.Client
+}
+
+// NewStore creates a new vector store
+func NewStore() (*Store, error) {
+	client, err := llm.NewClient()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LLM client: %w", err)
+	}
+
+	return &Store{
+		embeddings: make(map[string][]float64),
+		metadata:   make(map[string]*FileMetadata),
+		llmClient:  client,
+	}, nil
+}
 
 // FileMetadata represents metadata for indexed files
 type FileMetadata struct {
@@ -31,23 +55,23 @@ type ChunkMetadata struct {
 	Content   string
 }
 
-// VectorStore represents the NGT vector store
+// ChunkVector represents a chunk with its embedding vector
+type ChunkVector struct {
+	ChunkMetadata
+	Vector []float32
+}
+
+// VectorStore represents the in-memory vector store
 type VectorStore struct {
-	index     *ngt.Index
-	config    *ngt.Config
 	llmClient *llm.Client
 	metadata  map[uint32]*FileMetadata
+	vectors   map[uint32]*ChunkVector // Map of chunk ID to vector
 	mutex     sync.RWMutex
 	nextID    uint32
 }
 
 // NewVectorStore creates a new vector store
 func NewVectorStore() (*VectorStore, error) {
-	cfg := &ngt.Config{
-		Dimension: config.Config.NGT.Dimension,
-		EdgeSize:  config.Config.NGT.EdgeSize,
-	}
-
 	// Initialize LLM client
 	llmClient, err := llm.NewClient()
 	if err != nil {
@@ -55,9 +79,9 @@ func NewVectorStore() (*VectorStore, error) {
 	}
 
 	store := &VectorStore{
-		config:    cfg,
 		llmClient: llmClient,
 		metadata:  make(map[uint32]*FileMetadata),
+		vectors:   make(map[uint32]*ChunkVector),
 		nextID:    1,
 	}
 
@@ -70,15 +94,31 @@ func NewVectorStore() (*VectorStore, error) {
 	return store, nil
 }
 
+// cosineSimilarity calculates the cosine similarity between two vectors
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) {
+		return 0
+	}
+
+	var dotProduct float64
+	var normA float64
+	var normB float64
+
+	for i := 0; i < len(a); i++ {
+		dotProduct += float64(a[i] * b[i])
+		normA += float64(a[i] * a[i])
+		normB += float64(b[i] * b[i])
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+
+	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
 // CreateIndex creates a new vector index for the codebase
 func (v *VectorStore) CreateIndex(root string, extensions []string) error {
-	// Initialize NGT
-	index, err := ngt.NewIndex(v.config)
-	if err != nil {
-		return fmt.Errorf("failed to initialize NGT: %v", err)
-	}
-	v.index = index
-
 	// Process files
 	files, err := findCodeFiles(root, extensions)
 	if err != nil {
@@ -91,7 +131,7 @@ func (v *VectorStore) CreateIndex(root string, extensions []string) error {
 		}
 	}
 
-	// Save index and metadata to disk
+	// Save metadata to disk
 	if err := v.saveIndex(); err != nil {
 		return fmt.Errorf("failed to save index: %v", err)
 	}
@@ -99,21 +139,8 @@ func (v *VectorStore) CreateIndex(root string, extensions []string) error {
 	return nil
 }
 
-// SearchResult represents a search result
-type SearchResult struct {
-	FilePath  string
-	Content   string
-	StartLine int
-	EndLine   int
-	Score     float64
-}
-
 // Search performs a semantic search on the codebase
-func (v *VectorStore) Search(query string, limit int) ([]SearchResult, error) {
-	if v.index == nil {
-		return nil, fmt.Errorf("index not initialized")
-	}
-
+func (v *VectorStore) Search(query string, limit int) ([]types.SearchResult, error) {
 	// Generate embedding for query
 	ctx := context.Background()
 	queryEmbedding, err := v.llmClient.EmbedText(ctx, query)
@@ -121,76 +148,75 @@ func (v *VectorStore) Search(query string, limit int) ([]SearchResult, error) {
 		return nil, fmt.Errorf("failed to generate query embedding: %v", err)
 	}
 
-	// Convert float32 to float64 for NGT
-	queryVector := make([]float64, len(queryEmbedding))
-	for i, val := range queryEmbedding {
-		queryVector[i] = float64(val)
+	type scoreEntry struct {
+		chunkVec *ChunkVector
+		fileMeta *FileMetadata
+		score    float64
 	}
 
-	// Search in NGT index
-	results, err := v.index.Search(queryVector, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to search index: %v", err)
-	}
-
-	// Convert results to SearchResult format
-	searchResults := make([]SearchResult, 0, len(results))
+	// Calculate cosine similarity for all vectors
+	var scores []scoreEntry
 
 	v.mutex.RLock()
-	defer v.mutex.RUnlock()
-
-	for _, result := range results {
-		// Find the chunk metadata
-		var foundChunk *ChunkMetadata
-		var foundFile *FileMetadata
-
-		for _, fileMeta := range v.metadata {
-			for _, chunk := range fileMeta.Chunks {
-				if chunk.ID == result.ID {
-					foundChunk = &chunk
-					foundFile = fileMeta
-					break
-				}
-			}
-			if foundChunk != nil {
-				break
+	for _, fileMeta := range v.metadata {
+		for _, chunk := range fileMeta.Chunks {
+			if vec, ok := v.vectors[chunk.ID]; ok {
+				score := cosineSimilarity(queryEmbedding, vec.Vector)
+				scores = append(scores, scoreEntry{
+					chunkVec: vec,
+					fileMeta: fileMeta,
+					score:    score,
+				})
 			}
 		}
+	}
+	v.mutex.RUnlock()
 
-		if foundChunk != nil && foundFile != nil {
-			searchResult := SearchResult{
-				FilePath:  foundFile.FilePath,
-				Content:   foundChunk.Content,
-				StartLine: foundChunk.StartLine,
-				EndLine:   foundChunk.EndLine,
-				Score:     result.Distance, // NGT returns distance, lower is better
-			}
-			searchResults = append(searchResults, searchResult)
-		}
+	// Sort by score (higher is better for cosine similarity)
+	sort.Slice(scores, func(i, j int) bool {
+		return scores[i].score > scores[j].score
+	})
+
+	// Take top K results
+	if limit > len(scores) {
+		limit = len(scores)
+	}
+
+	// Convert to SearchResult format
+	searchResults := make([]types.SearchResult, 0, limit)
+	for i := 0; i < limit; i++ {
+		result := scores[i]
+		searchResults = append(searchResults, types.SearchResult{
+			Path:     result.fileMeta.FilePath,
+			Line:     result.chunkVec.StartLine,
+			Content:  result.chunkVec.Content,
+			Distance: result.score,
+		})
 	}
 
 	return searchResults, nil
 }
 
-// saveIndex saves the NGT index and metadata to disk
+// saveIndex saves metadata and vectors to disk
 func (v *VectorStore) saveIndex() error {
 	indexPath := config.Config.NGT.IndexPath
 
-	// Save NGT index
-	if err := v.index.Save(indexPath); err != nil {
-		return fmt.Errorf("failed to save NGT index: %v", err)
-	}
-
-	// Save metadata
-	metadataPath := filepath.Join(indexPath, "metadata.json")
 	v.mutex.RLock()
-	metadataBytes, err := json.Marshal(v.metadata)
+	data := struct {
+		Metadata map[uint32]*FileMetadata `json:"metadata"`
+		Vectors  map[uint32]*ChunkVector  `json:"vectors"`
+	}{
+		Metadata: v.metadata,
+		Vectors:  v.vectors,
+	}
+	metadataBytes, err := json.Marshal(data)
 	v.mutex.RUnlock()
 
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %v", err)
+		return fmt.Errorf("failed to marshal data: %v", err)
 	}
 
+	metadataPath := filepath.Join(indexPath, "metadata.json")
 	if err := ioutil.WriteFile(metadataPath, metadataBytes, 0644); err != nil {
 		return fmt.Errorf("failed to write metadata file: %v", err)
 	}
@@ -198,67 +224,62 @@ func (v *VectorStore) saveIndex() error {
 	return nil
 }
 
-// LoadIndex loads an existing index from disk
+// LoadIndex loads metadata and vectors from disk
 func (v *VectorStore) LoadIndex() error {
 	indexPath := config.Config.NGT.IndexPath
-
-	// Check if index exists
-	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
-		return fmt.Errorf("index does not exist at path: %s", indexPath)
-	}
-
-	// Load NGT index
-	index, err := ngt.LoadIndex(indexPath)
-	if err != nil {
-		return fmt.Errorf("failed to load NGT index: %v", err)
-	}
-	v.index = index
-
-	// Load metadata
 	metadataPath := filepath.Join(indexPath, "metadata.json")
-	if _, err := os.Stat(metadataPath); err == nil {
-		metadataBytes, err := ioutil.ReadFile(metadataPath)
-		if err != nil {
-			return fmt.Errorf("failed to read metadata file: %v", err)
-		}
 
-		v.mutex.Lock()
-		if err := json.Unmarshal(metadataBytes, &v.metadata); err != nil {
-			v.mutex.Unlock()
-			return fmt.Errorf("failed to unmarshal metadata: %v", err)
-		}
-
-		// Find the highest ID to set nextID
-		maxID := uint32(0)
-		for _, fileMeta := range v.metadata {
-			if fileMeta.ID > maxID {
-				maxID = fileMeta.ID
-			}
-			for _, chunk := range fileMeta.Chunks {
-				if chunk.ID > maxID {
-					maxID = chunk.ID
-				}
-			}
-		}
-		v.nextID = maxID + 1
-		v.mutex.Unlock()
+	// Check if metadata exists
+	if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
+		return fmt.Errorf("index does not exist at path: %s", metadataPath)
 	}
+
+	// Load metadata and vectors
+	metadataBytes, err := ioutil.ReadFile(metadataPath)
+	if err != nil {
+		return fmt.Errorf("failed to read metadata file: %v", err)
+	}
+
+	var data struct {
+		Metadata map[uint32]*FileMetadata `json:"metadata"`
+		Vectors  map[uint32]*ChunkVector  `json:"vectors"`
+	}
+
+	if err := json.Unmarshal(metadataBytes, &data); err != nil {
+		return fmt.Errorf("failed to unmarshal data: %v", err)
+	}
+
+	v.mutex.Lock()
+	v.metadata = data.Metadata
+	v.vectors = data.Vectors
+
+	// Find the highest ID to set nextID
+	maxID := uint32(0)
+	for _, fileMeta := range v.metadata {
+		if fileMeta.ID > maxID {
+			maxID = fileMeta.ID
+		}
+		for _, chunk := range fileMeta.Chunks {
+			if chunk.ID > maxID {
+				maxID = chunk.ID
+			}
+		}
+	}
+	v.nextID = maxID + 1
+	v.mutex.Unlock()
 
 	return nil
 }
 
-// Close closes the vector store
+// Close cleans up resources
 func (v *VectorStore) Close() error {
-	if v.index != nil {
-		return v.index.Close()
-	}
 	return nil
 }
 
-// FormatSearchResults formats search results for display
-func (sr SearchResult) String() string {
-	return fmt.Sprintf("File: %s (lines %d-%d, score: %.4f)\n%s",
-		sr.FilePath, sr.StartLine, sr.EndLine, sr.Score, sr.Content)
+// FormatSearchResult formats a search result for display
+func FormatSearchResult(sr types.SearchResult) string {
+	return fmt.Sprintf("File: %s (line %d, score: %.4f)\n%s",
+		sr.Path, sr.Line, sr.Distance, sr.Content)
 }
 
 // findCodeFiles finds code files in the workspace
@@ -286,7 +307,7 @@ func findCodeFiles(root string, extensions []string) ([]string, error) {
 	return files, err
 }
 
-// processFile processes a single file and adds its vectors to the index
+// processFile processes a single file and adds its vectors to the store
 func (v *VectorStore) processFile(file string) error {
 	// Read file content
 	content, err := ioutil.ReadFile(file)
@@ -314,7 +335,7 @@ func (v *VectorStore) processFile(file string) error {
 	}
 
 	// Process each chunk
-	for i, chunk := range chunks {
+	for _, chunk := range chunks {
 		if strings.TrimSpace(chunk.Content) == "" {
 			continue // Skip empty chunks
 		}
@@ -326,25 +347,21 @@ func (v *VectorStore) processFile(file string) error {
 			return fmt.Errorf("failed to generate embedding for chunk: %v", err)
 		}
 
-		// Convert float32 to float64 for NGT
-		vector := make([]float64, len(embedding))
-		for j, val := range embedding {
-			vector[j] = float64(val)
-		}
-
 		v.mutex.Lock()
 		chunkID := v.nextID
 		v.nextID++
-		v.mutex.Unlock()
 
-		// Add vector to index
-		if err := v.index.Insert(chunkID, vector); err != nil {
-			return fmt.Errorf("failed to insert vector: %v", err)
+		// Store chunk vector
+		chunkVec := &ChunkVector{
+			ChunkMetadata: chunk,
+			Vector:        embedding,
 		}
+		chunkVec.ID = chunkID
+		v.vectors[chunkID] = chunkVec
 
 		// Add chunk metadata
-		chunk.ID = chunkID
 		fileMeta.Chunks = append(fileMeta.Chunks, chunk)
+		v.mutex.Unlock()
 	}
 
 	// Store file metadata

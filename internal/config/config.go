@@ -2,28 +2,28 @@ package config
 
 import (
 	"fmt"
-	
+
 	"github.com/spf13/viper"
 )
 
 // Config holds the application configuration
 var Config = struct {
 	Ollama struct {
-		URL          string `mapstructure:"url"`
-		ChatModel    string `mapstructure:"chat_model"`
-		CodeModel    string `mapstructure:"code_model"`
+		URL            string `mapstructure:"url"`
+		ChatModel      string `mapstructure:"chat_model"`
+		CodeModel      string `mapstructure:"code_model"`
 		EmbeddingModel string `mapstructure:"embedding_model"`
-		Timeout      string `mapstructure:"timeout"`
+		Timeout        string `mapstructure:"timeout"`
 	}
 	NGT struct {
-		IndexPath  string `mapstructure:"index_path"`
-		Dimension  int    `mapstructure:"dimension"`
-		EdgeSize   int    `mapstructure:"edge_size"`
-		BatchSize  int    `mapstructure:"batch_size"`
+		IndexPath string `mapstructure:"index_path"`
+		Dimension int    `mapstructure:"dimension"`
+		EdgeSize  int    `mapstructure:"edge_size"`
+		BatchSize int    `mapstructure:"batch_size"`
 	}
 	Workspace struct {
-		Root            string   `mapstructure:"root"`
-		ExcludePatterns []string `mapstructure:"exclude_patterns"`
+		Root              string   `mapstructure:"root"`
+		ExcludePatterns   []string `mapstructure:"exclude_patterns"`
 		IncludeExtensions []string `mapstructure:"include_extensions"`
 	}
 	Logging struct {
@@ -33,24 +33,43 @@ var Config = struct {
 	}
 }{
 	Ollama: struct {
-		URL:          "http://localhost:11434",
-		ChatModel:    "llama2",
-		CodeModel:    "codellama",
+		URL            string `mapstructure:"url"`
+		ChatModel      string `mapstructure:"chat_model"`
+		CodeModel      string `mapstructure:"code_model"`
+		EmbeddingModel string `mapstructure:"embedding_model"`
+		Timeout        string `mapstructure:"timeout"`
+	}{
+		URL:            "http://localhost:11434",
+		ChatModel:      "llama2",
+		CodeModel:      "codellama",
 		EmbeddingModel: "nomic-embed-text",
-		Timeout:      "30s",
+		Timeout:        "30s",
 	},
 	NGT: struct {
-		IndexPath:  ".codecli/index",
-		Dimension:  768,
-		EdgeSize:   10,
-		BatchSize:  100,
+		IndexPath string `mapstructure:"index_path"`
+		Dimension int    `mapstructure:"dimension"`
+		EdgeSize  int    `mapstructure:"edge_size"`
+		BatchSize int    `mapstructure:"batch_size"`
+	}{
+		IndexPath: ".codecli/index",
+		Dimension: 768,
+		EdgeSize:  10,
+		BatchSize: 100,
 	},
 	Workspace: struct {
-		Root:            ".",
-		ExcludePatterns: []string{"*.git*", "node_modules", "*.log", "*.tmp"},
-		IncludeExtensions: []string{".go", ".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", "php"},
+		Root              string   `mapstructure:"root"`
+		ExcludePatterns   []string `mapstructure:"exclude_patterns"`
+		IncludeExtensions []string `mapstructure:"include_extensions"`
+	}{
+		Root:              ".",
+		ExcludePatterns:   []string{"*.git*", "node_modules", "*.log", "*.tmp"},
+		IncludeExtensions: []string{".go", ".py", ".js", ".ts", ".java", ".cpp", ".c", ".h", ".php"},
 	},
 	Logging: struct {
+		Level  string `mapstructure:"level"`
+		Format string `mapstructure:"format"`
+		Output string `mapstructure:"output"`
+	}{
 		Level:  "info",
 		Format: "json",
 		Output: "stdout",
